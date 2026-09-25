@@ -15,6 +15,15 @@ export default function App(){const[rows,setRowsRaw]=useState<Specimen[]>(load);
  const nearLive=useMemo(()=>reconcileConclusions(nearEntries,rows),[nearEntries,rows]);
  const nearActive=new Map(nearLive.map(e=>[e.pairKey,e]));
  const nearPending=nearPairs.filter(p=>!nearActive.has(pairKey(p.ids[0],p.ids[1]))).length;
+ // 失效即永久失效：工作集任何变更（编辑、撤销、删除、导入、合并、清空……）使结论指纹不再匹配时，
+ // 立即把失效结论从状态与浏览器存储一并剔除，不等进入复核区。此后撤销编辑、把字段改回原值、
+ // 刷新页面或从备份导回相同内部编号与字段的记录，都不会让旧结论复活，只有重新逐对确认才能恢复；
+ // 未改绑定字段的编辑与单纯调整半径不产生失效，其它对的结论不受影响
+ useEffect(()=>{
+   if(nearLive.length===nearEntries.length)return;
+   saveConclusions(nearLive);
+   setNearEntriesRaw(nearLive);
+ },[nearLive,nearEntries]);
  // 结论写入：基于核对后的有效结论集合更新，再试写浏览器；
  // 写入失败时界面保持原状态，不留下“已确认”的假象
  const setNearVerdict=(pair:NearPair,verdict:NearVerdict)=>{
@@ -25,11 +34,7 @@ export default function App(){const[rows,setRowsRaw]=useState<Specimen[]>(load);
    setNearEntriesRaw(next);
    flash('ok',`已标记为“${verdictLabel(verdict)}”，结论绑定双方字段指纹`);
  };
- const switchView=(v:'desk'|'near')=>{
-   setView(v);
-   // 打开复核区时把存储中指纹失效的旧结论物理剔除（半径变小只是暂不展示，不在此剔除）
-   if(v==='near'&&nearLive.length!==nearEntries.length){saveConclusions(nearLive);setNearEntriesRaw(nearLive)}
- };
+ const switchView=(v:'desk'|'near')=>setView(v);
  // 卡片上的加入/移出按钮：去重、保序由领域层保证
  const toggleBatch=(id:string)=>setBatchIds(batchIds.includes(id)?removeFromBatch(batchIds,id):addToBatch(batchIds,id));
  // 打开预览时清理已不存在的成员（导入 JSON、载入示例或删除记录后可能失效）；空批次只提示，不改变工作集

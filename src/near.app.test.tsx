@@ -4,7 +4,7 @@ import{cleanup,fireEvent,render,screen,within}from'@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import App from'./App';
 import{Specimen}from'./types';
-import{EARTH_RADIUS_M,NEAR_KEY}from'./near';
+import{EARTH_RADIUS_M,NEAR_KEY,pairKey}from'./near';
 import{BATCH_KEY}from'./batch';
 
 const KEY='plant-preflight-v1';
@@ -29,11 +29,22 @@ const editNo=(no:string,field:string,value:string)=>{
   fireEvent.click(screen.getByText('保存记录'));
 };
 const flashErr=()=>document.querySelector('.toast.err')?.textContent||'';
+const uploadJson=(text:string)=>{
+  const label=screen.getByText('导入 JSON').closest('label')!;
+  fireEvent.change(label.querySelector('input[type=file]')!,{target:{files:[new File([text],'b.json',{type:'application/json'})]}});
+};
 
 beforeEach(()=>{
   localStorage.clear();
   vi.restoreAllMocks();
   cleanup();
+  // jsdom 26 未内置 Blob.text，供 JSON 备份导入使用
+  const proto=Blob.prototype as unknown as {text?:unknown};
+  if(!proto.text){
+    proto.text=function(this:Blob){
+      return new Promise<string>((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result));r.onerror=rej;r.readAsText(this)});
+    };
+  }
 });
 
 describe('近地点复核工作区',()=>{
@@ -125,7 +136,8 @@ describe('近地点复核工作区',()=>{
     // 回到工作台把 id3 再东移 150 米：(2,3) 变 150 米仍在 200 米半径内但指纹已变；(1,3)=250 米不直接推断
     openDesk();
     editNo('N-3','经度',lon(250));
-    expect(localStorage.getItem(NEAR_KEY)).not.toBeNull(); // 复核键不被编辑流程触碰
+    // 编辑保存时失效结论即从存储剔除（不必进入复核区）：只剩 (1,2) 一条
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toHaveLength(1);
     openNear();
     setRadius('200');
     expect(nearCards()).toHaveLength(2);
@@ -146,11 +158,13 @@ describe('近地点复核工作区',()=>{
     fireEvent.click(within(cardByNos('N-1','N-2')).getByRole('button',{name:'同点复采'}));
     openDesk();
     editNo('N-1','采集编号','N-9');
+    // 失效条目在编辑保存时即从存储剔除，无需进入复核区
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toHaveLength(0);
     openNear();
     // 编号不同仍可配对，但旧结论绑定的是原编号指纹：标记消失、回到待复核
     expect(nearCards()).toHaveLength(1);
     expect(within(cardByNos('N-9','N-2')).getByText('待复核')).toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toHaveLength(0); // 失效条目在打开复核区时已清理
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toHaveLength(0);
   });
 
   it('改地点/生境备注不使结论失效',()=>{
@@ -160,8 +174,90 @@ describe('近地点复核工作区',()=>{
     fireEvent.click(within(cardByNos('N-1','N-2')).getByRole('button',{name:'同点复采'}));
     openDesk();
     editNo('N-2','地点','另一处地点');
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toHaveLength(1); // 未改绑定字段：存储中的结论保留
     openNear();
     expect(cardByNos('N-1','N-2').textContent).toContain('已判：同点复采');
+  });
+
+  it('确认有效期：修改后撤销、刷新后改回原值、删除后恢复备份，旧结论均不复活',async()=>{
+    vi.spyOn(window,'confirm').mockReturnValue(true);
+    localStorage.setItem(BATCH_KEY,JSON.stringify(['id1','id4']));
+    // 两对独立标签：A=(id1,id2) 采集人甲、B=(id3,id4) 采集人乙，对内相距 40 米，默认半径 50 米
+    seed([
+      rec(1,{collector:'甲'}),rec(2,{collector:'甲',longitude:lon(40)}),
+      rec(3,{collector:'乙'}),rec(4,{collector:'乙',longitude:lon(40)}),
+    ]);
+    const{unmount}=render(<App/>);
+    const storedKeys=()=>JSON.parse(localStorage.getItem(NEAR_KEY)||'[]').map((c:{pairKey:string})=>c.pairKey);
+    const badge=()=>screen.getByRole('button',{name:/^近地点复核/}).querySelector('.tab-count')?.textContent??null;
+    openNear();
+    // 两对各自确认：待办清零，存储各一条
+    fireEvent.click(within(cardByNos('N-1','N-2')).getByRole('button',{name:'同点复采'}));
+    fireEvent.click(within(cardByNos('N-3','N-4')).getByRole('button',{name:'确为两份'}));
+    expect(badge()).toBeNull();
+    expect(storedKeys()).toEqual([pairKey('id1','id2'),pairKey('id3','id4')]);
+    expect(document.querySelector('.near-summary')!.textContent).toContain('0 对待复核 · 2 对已有结论');
+
+    // ① 修改后撤销（触及 A 对）：改 id1 编号 → A 回到待复核且存储立即剔除；B 对不受牵连
+    openDesk();
+    editNo('N-1','采集编号','N-1X');
+    expect(storedKeys()).toEqual([pairKey('id3','id4')]);
+    openNear();
+    expect(within(cardByNos('N-1X','N-2')).getByText('待复核')).toBeInTheDocument();
+    expect(cardByNos('N-3','N-4').textContent).toContain('已判：确为两份');
+    expect(badge()).toBe('1');
+    // 撤销把编号改回确认时的文本：旧结论不复活，A 保持待复核
+    openDesk();
+    fireEvent.click(screen.getByRole('button',{name:'撤销本次编辑'}));
+    expect(storedKeys()).toEqual([pairKey('id3','id4')]);
+    openNear();
+    expect(within(cardByNos('N-1','N-2')).getByText('待复核')).toBeInTheDocument();
+    expect(cardByNos('N-3','N-4').textContent).toContain('已判：确为两份');
+    expect(badge()).toBe('1');
+
+    // ② 刷新后改回原值（触及 B 对）：改 id3 经度 → B 待复核；刷新前后存储均无残留；改回原值仍不复活
+    openDesk();
+    editNo('N-3','经度',lon(45));
+    expect(storedKeys()).toEqual([]);
+    expect(badge()).toBe('2');
+    unmount();
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toEqual([]); // 刷新前：存储已清
+    render(<App/>);
+    expect(JSON.parse(localStorage.getItem(NEAR_KEY)!)).toEqual([]); // 刷新后：没有可复活的旧结论
+    openNear();
+    expect(within(cardByNos('N-1','N-2')).getByText('待复核')).toBeInTheDocument();
+    expect(within(cardByNos('N-3','N-4')).getByText('待复核')).toBeInTheDocument();
+    expect(badge()).toBe('2');
+    openDesk();
+    editNo('N-3','经度',lon(40)); // 改回确认时的文本
+    expect(storedKeys()).toEqual([]);
+    openNear();
+    expect(within(cardByNos('N-3','N-4')).getByText('待复核')).toBeInTheDocument();
+    expect(badge()).toBe('2');
+
+    // ③ 删除后恢复备份（触及 A 对）：重新确认 A 后删除 id2，再导回含相同内部编号与字段的备份
+    fireEvent.click(within(cardByNos('N-1','N-2')).getByRole('button',{name:'同点复采'}));
+    expect(cardByNos('N-1','N-2').textContent).toContain('已判：同点复采'); // 只有重新确认才能恢复
+    expect(storedKeys()).toEqual([pairKey('id1','id2')]);
+    const backup=localStorage.getItem(KEY)!;
+    openDesk();
+    fireEvent.click(within(cardByName('N-2')).getByRole('button',{name:'删除'}));
+    expect(storedKeys()).toEqual([]); // 删除即剔除，不等进入复核区
+    openNear();
+    expect(nearCards()).toHaveLength(1); // 只剩 B 对
+    expect(badge()).toBe('1');
+    openDesk();
+    uploadJson(backup);
+    expect(await screen.findByText('已恢复 4 条记录')).toBeInTheDocument();
+    openNear();
+    expect(nearCards()).toHaveLength(2);
+    expect(within(cardByNos('N-1','N-2')).getByText('待复核')).toBeInTheDocument(); // 旧结论未随备份复活
+    expect(within(cardByNos('N-3','N-4')).getByText('待复核')).toBeInTheDocument();
+    expect(document.querySelector('.near-summary')!.textContent).toContain('2 对待复核 · 0 对已有结论');
+    expect(badge()).toBe('2');
+    expect(storedKeys()).toEqual([]);
+    // 打印批次全程不受牵连
+    expect(JSON.parse(localStorage.getItem(BATCH_KEY)!)).toEqual(['id1','id4']);
   });
 
   it('存储失败时不留下已确认假象：按钮状态不变并提示错误',()=>{
