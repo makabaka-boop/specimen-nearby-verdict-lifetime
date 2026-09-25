@@ -25,11 +25,15 @@ export default function App(){const[rows,setRowsRaw]=useState<Specimen[]>(load);
    setNearEntriesRaw(next);
    flash('ok',`已标记为“${verdictLabel(verdict)}”，结论绑定双方字段指纹`);
  };
- const switchView=(v:'desk'|'near')=>{
-   setView(v);
-   // 打开复核区时把存储中指纹失效的旧结论物理剔除（半径变小只是暂不展示，不在此剔除）
-   if(v==='near'&&nearLive.length!==nearEntries.length){saveConclusions(nearLive);setNearEntriesRaw(nearLive)}
- };
+ // 确认有效期以“成功变更”为准：工作集每次变化（编辑、撤销、删除、导入、合并、清空、载入示例）及页面挂载时，
+ // 立即把指纹失效或记录缺失的结论从状态与浏览器存储中一并物理剔除——此后即便把字段改回确认时的文本、
+ // 撤销编辑或恢复同内部编号的备份，旧结论也不复活，只能重新逐对确认；
+ // 未改绑定字段的编辑与单纯调整半径不产生失效，其它记录对的结论原样保留
+ useEffect(()=>{
+   if(nearLive.length===nearEntries.length)return;
+   saveConclusions(nearLive); // 存储写失败也先更新状态：界面不留下“已确认”的假象
+   setNearEntriesRaw(nearLive);
+ },[nearLive,nearEntries]);
  // 卡片上的加入/移出按钮：去重、保序由领域层保证
  const toggleBatch=(id:string)=>setBatchIds(batchIds.includes(id)?removeFromBatch(batchIds,id):addToBatch(batchIds,id));
  // 打开预览时清理已不存在的成员（导入 JSON、载入示例或删除记录后可能失效）；空批次只提示，不改变工作集
@@ -99,7 +103,7 @@ useEffect(()=>{const boot=loadUndo();if(boot==='invalid'||(boot&&!rows.some(r=>r
   setMerge(null);
   flash('ok','记录已合并，问题清单已重新计算');
  };
- return <><header><div><span className="eyebrow">HERBARIUM DESK · 01</span><h1>植物标本标签<br/>预检台</h1><p>在打印之前，把每一份野外记录整理得准确、完整、可追溯。</p></div><button className="primary" onClick={()=>setEdit({...blank})}>＋ 新增标本</button></header><main><nav className="workspace-tabs" aria-label="工作区切换">{[{k:'desk',t:'预检工作台'},{k:'near',t:'近地点复核'}].map(x=><button key={x.k} className={view===x.k?'tab-on':''} aria-pressed={view===x.k} onClick={()=>switchView(x.k as 'desk'|'near')}>{x.t}{x.k==='near'&&nearPending>0&&<span className="tab-count">{nearPending}</span>}</button>)}</nav>{msg&&<div role="alert" className={`toast ${msg.kind}`}>{msg.text}</div>}{view==='desk'&&<><section className="metrics"><article><span>馆藏记录</span><strong>{rows.length}</strong><small>当前工作集</small></article><article><span>待处理问题</span><strong>{issues.filter(i=>(rows.find(r=>r.id===i.recordId)?.resolutions[i.key]?.status||'pending')==='pending').length}</strong><small>需要人工复核</small></article><article><span>预检通过</span><strong>{rows.filter(r=>!issues.some(i=>i.recordId===r.id&&(r.resolutions[i.key]?.status||'pending')==='pending')).length}</strong><small>可进入打印</small></article><article><span>物种数</span><strong>{speciesCount(rows)}</strong><small>已识别名称</small></article></section>
+ return <><header><div><span className="eyebrow">HERBARIUM DESK · 01</span><h1>植物标本标签<br/>预检台</h1><p>在打印之前，把每一份野外记录整理得准确、完整、可追溯。</p></div><button className="primary" onClick={()=>setEdit({...blank})}>＋ 新增标本</button></header><main><nav className="workspace-tabs" aria-label="工作区切换">{[{k:'desk',t:'预检工作台'},{k:'near',t:'近地点复核'}].map(x=><button key={x.k} className={view===x.k?'tab-on':''} aria-pressed={view===x.k} onClick={()=>setView(x.k as 'desk'|'near')}>{x.t}{x.k==='near'&&nearPending>0&&<span className="tab-count">{nearPending}</span>}</button>)}</nav>{msg&&<div role="alert" className={`toast ${msg.kind}`}>{msg.text}</div>}{view==='desk'&&<><section className="metrics"><article><span>馆藏记录</span><strong>{rows.length}</strong><small>当前工作集</small></article><article><span>待处理问题</span><strong>{issues.filter(i=>(rows.find(r=>r.id===i.recordId)?.resolutions[i.key]?.status||'pending')==='pending').length}</strong><small>需要人工复核</small></article><article><span>预检通过</span><strong>{rows.filter(r=>!issues.some(i=>i.recordId===r.id&&(r.resolutions[i.key]?.status||'pending')==='pending')).length}</strong><small>可进入打印</small></article><article><span>物种数</span><strong>{speciesCount(rows)}</strong><small>已识别名称</small></article></section>
  <section className="toolbar"><div><b>标本工作集</b><span>{visible.length} / {rows.length} 条</span></div><div className="actions"><label className="button">导入 CSV<input type="file" accept=".csv,text/csv" onChange={e=>fileText(e,importCsvFile)}/></label><label className="button">导入 JSON<input type="file" accept=".json" onChange={e=>fileText(e,importJson)}/></label><button onClick={exportJson}>导出 JSON</button><button className="primary" onClick={openBatch}>打印批次<span className="batch-count" aria-label={`批次含 ${batchIds.length} 份标本`}>{batchIds.length}</span></button><button onClick={()=>{setRows(samples);setUndo(null);flash('ok','示例数据已载入')}}>载入示例</button><button className="danger" onClick={()=>{if(confirm('确定清空全部记录？此操作无法撤销。')){setRows([]);setUndo(null);flash('ok','已清空全部记录')}}}>一键清空</button></div></section>
  {undo&&undoTarget&&<section className="undo-bar"><span>最近保存的编辑：<b>{undoTarget.collectionNo}</b>{undo.snapshot.collectionNo!==undoTarget.collectionNo&&<>（保存前编号：{undo.snapshot.collectionNo}）</>}</span><button className="primary" onClick={undoEdit}>撤销本次编辑</button></section>}
  <section className="filters"><input placeholder="按物种筛选" value={filters.species} onChange={e=>setFilters({...filters,species:e.target.value})}/><input placeholder="按采集人筛选" value={filters.collector} onChange={e=>setFilters({...filters,collector:e.target.value})}/><input placeholder="按地点筛选" value={filters.location} onChange={e=>setFilters({...filters,location:e.target.value})}/><select value={filters.status} onChange={e=>setFilters({...filters,status:e.target.value})}><option value="all">全部问题状态</option><option value="pending">待处理</option><option value="resolved">已处理</option><option value="clean">无问题</option></select></section>
